@@ -29,7 +29,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/,'');
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const ADMIN_KEY = process.env.ADMIN_KEY || ''; // <<< add this in Render to enable admin endpoints
+const ADMIN_KEY = process.env.ADMIN_KEY || ''; // enable admin API
 
 /* ───────────────────────── Reward mapping ───────────────────────── */
 const norm = (s) => (s || '').toString().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -59,7 +59,7 @@ const REWARD_MAP = buildNormalizedMap(RAW_REWARD_MAP);
 const store = await createStore({ __dirname, DATABASE_URL });
 await store.init();
 
-/* ───────────────────────── Small helpers ───────────────────────── */
+/* ───────────────────────── Helpers ───────────────────────── */
 async function fetchJSON(urlStr, options = {}) {
   const res = await fetch(urlStr, options);
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -67,10 +67,10 @@ async function fetchJSON(urlStr, options = {}) {
 }
 function redirectUri() {
   const base = PUBLIC_URL || `http://localhost:${PORT}`;
-  return `${base}/auth/callback`;
+  return `${base}/auth/callback`
 }
 
-/* ───────────────────────── OAuth (with state) ───────────────────────── */
+/* ───────────────────────── OAuth with state ───────────────────────── */
 const SCOPES = ['channel:read:redemptions'];
 const stateStore = new Map(); // state -> expiresAt
 function makeState() {
@@ -248,7 +248,7 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-/* ───────────────────────── Socket.IO ───────────────────────── */
+/* ───────────────────────── Socket.IO (DECLARE ONCE) ───────────────────────── */
 const server = http.createServer(app);
 const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
 function broadcastUpdate(user, value, delta, source) {
@@ -300,7 +300,6 @@ function requireAdmin(req, res, next) {
 }
 
 /* ───────────────────────── Admin endpoints ───────────────────────── */
-// Reset a viewer to 0
 app.post('/api/admin/karma/reset/:user', requireAdmin, async (req, res) => {
   const user = req.params.user;
   const current = await store.getUser(user);
@@ -313,7 +312,6 @@ app.post('/api/admin/karma/reset/:user', requireAdmin, async (req, res) => {
   res.json({ user, value: current, delta: 0 });
 });
 
-// Set a viewer to an absolute value
 app.post('/api/admin/karma/set/:user', requireAdmin, async (req, res) => {
   const user = req.params.user;
   let value = Number(req.body?.value);
@@ -328,7 +326,6 @@ app.post('/api/admin/karma/set/:user', requireAdmin, async (req, res) => {
   res.json({ user, value: current, delta: 0 });
 });
 
-// Add a delta (+/-)
 app.post('/api/admin/karma/add/:user', requireAdmin, async (req, res) => {
   const user = req.params.user;
   let delta = Number(req.body?.delta);
@@ -338,16 +335,7 @@ app.post('/api/admin/karma/add/:user', requireAdmin, async (req, res) => {
   res.json({ user, value, delta });
 });
 
-/* ───────────────────────── Server ───────────────────────── */
-const server = http.createServer(app);
-const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
-
-server.listen(PORT, () => {
-  console.log(`HTTP + Socket.IO on port ${PORT}`);
-  boot().catch(e => console.error('[boot]', e.message));
-});
-
-/* ───────────────────────── Boot ───────────────────────── */
+/* ───────────────────────── Boot + Listen ───────────────────────── */
 let eventsub = null;
 async function boot() {
   let tokens = await store.loadTokens();
@@ -374,3 +362,8 @@ async function startEventSubWithTokens(tokens) {
   eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
   eventsub.start();
 }
+
+server.listen(PORT, () => {
+  console.log(`HTTP + Socket.IO on port ${PORT}`);
+  boot().catch(e => console.error('[boot]', e.message));
+});
