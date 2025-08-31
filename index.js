@@ -28,7 +28,8 @@ const BROADCASTER_LOGIN = (process.env.BROADCASTER_LOGIN || '').toLowerCase();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/,'');
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean); // e.g. "https://doomzfire.netlify.app"
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+const ADMIN_KEY = process.env.ADMIN_KEY || ''; // <<< add this in Render to enable admin endpoints
 
 /* ───────────────────────── Reward mapping ───────────────────────── */
 const norm = (s) => (s || '').toString().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -240,7 +241,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.length ? origin : '*');
   }
   res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-key');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -252,12 +253,12 @@ const server = http.createServer(app);
 const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
 function broadcastUpdate(user, value, delta, source) {
   io.emit('karma:update', { user, value, delta, source, at: Date.now() });
-  console.log(`[karma] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value}`);
+  console.log(`[karma] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value} (${source})`);
 }
 
-/* ───────────────────────── Routes ───────────────────────── */
+/* ───────────────────────── Routes (public) ───────────────────────── */
 app.get('/health', (req, res) => res.type('text/plain').send('ok'));
-app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (prod)'));
+app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (prod + admin)'));
 app.get('/auth/login', (req, res) => {
   if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET');
   res.redirect(authURL());
@@ -290,7 +291,57 @@ app.get('/api/karma/pending', async (req, res) => res.json(await store.pendingAl
 app.get('/api/karma/:user', async (req, res) => res.json({ user: req.params.user, value: await store.getUser(req.params.user) }));
 app.use('/overlay', express.static(path.join(__dirname, 'public')));
 
+/* ───────────────────────── Admin middleware ───────────────────────── */
+function requireAdmin(req, res, next) {
+  if (!ADMIN_KEY) return res.status(503).json({ error: 'Admin API disabled (set ADMIN_KEY env var)' });
+  const key = req.headers['x-admin-key'] || req.query.key;
+  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+}
+
+/* ───────────────────────── Admin endpoints ───────────────────────── */
+// Reset a viewer to 0
+app.post('/api/admin/karma/reset/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  const current = await store.getUser(user);
+  const delta = -current;
+  if (delta !== 0) {
+    const value = await store.applyDelta(user, delta);
+    broadcastUpdate(user, value, delta, 'admin:reset');
+    return res.json({ user, value, delta });
+  }
+  res.json({ user, value: current, delta: 0 });
+});
+
+// Set a viewer to an absolute value
+app.post('/api/admin/karma/set/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  let value = Number(req.body?.value);
+  if (!Number.isFinite(value)) return res.status(400).json({ error: 'Body { value:number } required' });
+  const current = await store.getUser(user);
+  const delta = value - current;
+  if (delta !== 0) {
+    const newVal = await store.applyDelta(user, delta);
+    broadcastUpdate(user, newVal, delta, 'admin:set');
+    return res.json({ user, value: newVal, delta });
+  }
+  res.json({ user, value: current, delta: 0 });
+});
+
+// Add a delta (+/-)
+app.post('/api/admin/karma/add/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  let delta = Number(req.body?.delta);
+  if (!Number.isFinite(delta) || delta === 0) return res.status(400).json({ error: 'Body { delta:number (non-zero) } required' });
+  const value = await store.applyDelta(user, delta);
+  broadcastUpdate(user, value, delta, 'admin:add');
+  res.json({ user, value, delta });
+});
+
 /* ───────────────────────── Server ───────────────────────── */
+const server = http.createServer(app);
+const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
+
 server.listen(PORT, () => {
   console.log(`HTTP + Socket.IO on port ${PORT}`);
   boot().catch(e => console.error('[boot]', e.message));
