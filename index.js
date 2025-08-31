@@ -26,7 +26,7 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const BROADCASTER_LOGIN = (process.env.BROADCASTER_LOGIN || '').toLowerCase();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g., https://doomz-railway.up.railway.app
+const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g., https://doomz-xxxxx.onrender.com
 
 /* ========== Normalize + Reward mapping ========== */
 const norm = (s) => (s || '').toString()
@@ -68,15 +68,15 @@ await store.init();
 /* ========== HTTP helper ========== */
 async function fetchJSON(urlStr, options = {}) {
   const res = await fetch(urlStr, options);
-  if (!res.ok) throw new Error(\`HTTP \${res.status}: \${await res.text()}\`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
 /* ========== OAuth ========== */
 const SCOPES = ['channel:read:redemptions']; // read-only flow
 function redirectUri() {
-  const base = PUBLIC_URL || \`http://localhost:\${PORT}\`;
-  return \`\${base.replace(/\/+\$/,'')}/auth/callback\`;
+  const base = PUBLIC_URL || `http://localhost:${PORT}`;
+  return `${base.replace(/\/+$/,'')}/auth/callback`;
 }
 function authURL() {
   const params = new URLSearchParams({
@@ -86,7 +86,7 @@ function authURL() {
     scope: SCOPES.join(' '),
     force_verify: 'true'
   });
-  return \`https://id.twitch.tv/oauth2/authorize?\${params.toString()}\`;
+  return `https://id.twitch.tv/oauth2/authorize?${params.toString()}`;
 }
 async function exchangeCodeForToken(code) {
   const params = new URLSearchParams({
@@ -109,9 +109,9 @@ async function refreshToken(refresh_token) {
 }
 async function getUserInfo(access_token) {
   const res = await fetch('https://api.twitch.tv/helix/users', {
-    headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${access_token}\` }
+    headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${access_token}` }
   });
-  if (!res.ok) throw new Error(\`getUserInfo failed: \${res.status} \${await res.text()}\`);
+  if (!res.ok) throw new Error(`getUserInfo failed: ${res.status} ${await res.text()}`);
   const j = await res.json();
   return j.data && j.data[0];
 }
@@ -164,7 +164,7 @@ class EventSubWS {
             const key = norm(title);
             const delta = REWARD_MAP[key] ?? REWARD_MAP[stripEmoji(key)] ?? 0;
             if (!delta) {
-              console.log(\`[PENDING] Ignored unmapped reward "\${title}" from \${user}\`);
+              console.log(`[PENDING] Ignored unmapped reward "${title}" from ${user}`);
               return;
             }
             await store.pendingAdd({
@@ -174,7 +174,7 @@ class EventSubWS {
               at: Date.now(),
               status: 'UNFULFILLED'
             });
-            console.log(\`[PENDING] Added "\${title}" by \${user} (delta \${delta}) id=\${redId}\`);
+            console.log(`[PENDING] Added "${title}" by ${user} (delta ${delta}) id=${redId}`);
             io && io.emit('karma:pending', { id: redId, user, title, delta });
           }
 
@@ -182,15 +182,15 @@ class EventSubWS {
             const redId = event?.id;
             const status = (event?.status || '').toUpperCase(); // FULFILLED | CANCELED
             const rec = await store.pendingGet(redId);
-            console.log(\`[UPDATE] Redemption id=\${redId} status=\${status}\`);
+            console.log(`[UPDATE] Redemption id=${redId} status=${status}`);
             if (!rec) return;
             if (status === 'FULFILLED') {
               const value = await store.applyDelta(rec.user, rec.delta);
-              broadcastUpdate(rec.user, value, rec.delta, \`reward:\${rec.title}\`);
+              broadcastUpdate(rec.user, value, rec.delta, `reward:${rec.title}`);
               await store.pendingDelete(redId);
             } else if (status === 'CANCELED') {
               await store.pendingDelete(redId);
-              console.log(\`[PENDING] Canceled "\${rec.title}" by \${rec.user} → removed\`);
+              console.log(`[PENDING] Canceled "${rec.title}" by ${rec.user} → removed`);
             }
           }
         }
@@ -229,27 +229,27 @@ class EventSubWS {
       method: 'POST',
       headers: {
         'Client-ID': CLIENT_ID,
-        'Authorization': \`Bearer \${this.accessToken}\`,
+        'Authorization': `Bearer ${this.accessToken}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(\`CreateSub \${type} failed: \${res.status} \${await res.text()}\`);
+    if (!res.ok) throw new Error(`CreateSub ${type} failed: ${res.status} ${await res.text()}`);
     return res.json();
   }
   async apiListSubs() {
     const res = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
-      headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${this.accessToken}\` }
+      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}` }
     });
-    if (!res.ok) throw new Error(\`ListSub failed \${res.status}\`);
+    if (!res.ok) throw new Error(`ListSub failed ${res.status}`);
     return res.json();
   }
   async apiDeleteSub(id) {
-    const res = await fetch(\`https://api.twitch.tv/helix/eventsub/subscriptions?id=\${encodeURIComponent(id)}\`, {
+    const res = await fetch(`https://api.twitch.tv/helix/eventsub/subscriptions?id=${encodeURIComponent(id)}`, {
       method: 'DELETE',
-      headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${this.accessToken}\` }
+      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}` }
     });
-    if (!res.ok) throw new Error(\`DeleteSub failed \${res.status}\`);
+    if (!res.ok) throw new Error(`DeleteSub failed ${res.status}`);
   }
 }
 
@@ -267,7 +267,7 @@ app.use(express.json());
 let io = null;
 function broadcastUpdate(user, value, delta, source) {
   if (io) io.emit('karma:update', { user, value, delta, source, at: Date.now() });
-  console.log(\`[KARMA] \${user} \${delta >= 0 ? '+' : ''}\${delta} -> \${value} (\${source})\`);
+  console.log(`[KARMA] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value} (${source})`);
 }
 
 /* ========== Routes ========== */
@@ -309,7 +309,7 @@ const server = http.createServer(app);
 io = new SocketIOServer(server, { cors: { origin: '*' } });
 
 server.listen(PORT, () => {
-  console.log(\`HTTP + Socket.IO on port \${PORT}\`);
+  console.log(`HTTP + Socket.IO on port ${PORT}`);
   boot().catch(e => console.error('[BOOT] error', e));
 });
 
@@ -317,7 +317,7 @@ server.listen(PORT, () => {
 async function boot() {
   let tokens = await store.loadTokens();
   if (!tokens) {
-    console.log(\`Open \${redirectUri().replace('0.0.0.0','localhost')} /auth/login to authorize.\`);
+    console.log(`Open ${redirectUri().replace('0.0.0.0','localhost')} /auth/login to authorize.`);
     return;
   }
   if (tokens.refresh_token) {
@@ -328,7 +328,7 @@ async function boot() {
       await store.saveTokens(tokens);
     } catch (e) {
       console.warn('[BOOT] Refresh failed, requiring re-auth:', e.message);
-      console.log(\`Open \${redirectUri()} to authorize.\`);
+      console.log(`Open ${redirectUri()} to authorize.`);
       return;
     }
   }
@@ -339,7 +339,7 @@ let eventsub = null;
 async function startEventSubWithTokens(tokens) {
   const info = await getUserInfo(tokens.access_token);
   const bId = info.id;
-  console.log('[BOOT] EventSub for broadcaster', info.login, \`(\${bId})\`);
+  console.log('[BOOT] EventSub for broadcaster', info.login, `(${bId})`);
   if (eventsub) eventsub.stop();
   eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
   eventsub.start();
