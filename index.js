@@ -2,19 +2,16 @@ import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import fetch from 'node-fetch';
-import { WebSocket as WS } from 'ws'; // <-- static import (fix)
+import { WebSocket as WS } from 'ws';
 import fs from 'fs';
 import path from 'path';
 import url from 'url';
+import crypto from 'crypto';
 import { createStore } from './storage.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-// Render is behind a proxy
-const app = express();
-app.set('trust proxy', 1);
-
-/* ========== .env loader (local dev) ========== */
+/* ───────────────────────── .env (local) ───────────────────────── */
 const dotenvPath = path.join(__dirname, '.env');
 if (fs.existsSync(dotenvPath)) {
   const lines = fs.readFileSync(dotenvPath, 'utf8').split(/\r?\n/);
@@ -24,22 +21,18 @@ if (fs.existsSync(dotenvPath)) {
   }
 }
 
-/* ========== Config ========== */
+/* ───────────────────────── Config ───────────────────────── */
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const BROADCASTER_LOGIN = (process.env.BROADCASTER_LOGIN || '').toLowerCase();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/,'');
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean); // e.g. "https://doomzfire.netlify.app"
 
-/* ========== Normalize + Reward mapping ========== */
-const norm = (s) => (s || '').toString()
-  .normalize('NFKD')
-  .replace(/[\u0300-\u036f]/g, '')
-  .toLowerCase()
-  .trim();
+/* ───────────────────────── Reward mapping ───────────────────────── */
+const norm = (s) => (s || '').toString().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const stripEmoji = (s) => s.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, '').trim();
-
 const DEFAULT_REWARD_MAP = {
   "heal💓": 1, "heal": 1,
   "eat🍏": 1, "eat": 1,
@@ -58,38 +51,45 @@ function buildNormalizedMap(raw) {
   return out;
 }
 let RAW_REWARD_MAP = DEFAULT_REWARD_MAP;
-try {
-  if (process.env.REWARD_MAP_JSON) RAW_REWARD_MAP = JSON.parse(process.env.REWARD_MAP_JSON);
-} catch (e) { console.warn('[WARN] Invalid REWARD_MAP_JSON:', e.message); }
+try { if (process.env.REWARD_MAP_JSON) RAW_REWARD_MAP = JSON.parse(process.env.REWARD_MAP_JSON); } catch {}
 const REWARD_MAP = buildNormalizedMap(RAW_REWARD_MAP);
 
-/* ========== Stores ========== */
+/* ───────────────────────── Stores ───────────────────────── */
 const store = await createStore({ __dirname, DATABASE_URL });
 await store.init();
 
-/* ========== HTTP helper ========== */
+/* ───────────────────────── Small helpers ───────────────────────── */
 async function fetchJSON(urlStr, options = {}) {
   const res = await fetch(urlStr, options);
-  if (!res.ok) {
-    const text = await res.text().catch(()=>'[no text]');
-    throw new Error(`HTTP ${res.status}: ${text}`);
-  }
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   return res.json();
 }
-
-/* ========== OAuth ========== */
-const SCOPES = ['channel:read:redemptions'];
 function redirectUri() {
   const base = PUBLIC_URL || `http://localhost:${PORT}`;
   return `${base}/auth/callback`;
+}
+
+/* ───────────────────────── OAuth (with state) ───────────────────────── */
+const SCOPES = ['channel:read:redemptions'];
+const stateStore = new Map(); // state -> expiresAt
+function makeState() {
+  const s = crypto.randomBytes(16).toString('hex');
+  stateStore.set(s, Date.now() + 10 * 60 * 1000);
+  return s;
+}
+function isStateValid(s) {
+  const exp = stateStore.get(s);
+  if (!exp) return false;
+  stateStore.delete(s);
+  return exp > Date.now();
 }
 function authURL() {
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: redirectUri(),
     response_type: 'code',
-    scope: SCOPES.join(' ')
-    // force_verify removed to avoid certain loops
+    scope: SCOPES.join(' '),
+    state: makeState()
   });
   return `https://id.twitch.tv/oauth2/authorize?${params.toString()}`;
 }
@@ -121,7 +121,7 @@ async function getUserInfo(access_token) {
   return j.data && j.data[0];
 }
 
-/* ========== EventSub WebSocket ========== */
+/* ───────────────────────── EventSub WS ───────────────────────── */
 class EventSubWS {
   constructor({ accessToken, broadcasterId }) {
     this.accessToken = accessToken;
@@ -135,14 +135,10 @@ class EventSubWS {
   stop() { if (this.ws) this.ws.close(); this.ws = null; this.sessionId = null; this.reconnectUrl = null; }
 
   connect(url) {
-    console.log('[EventSub] Connecting:', url);
-    this.ws = new WS(url); // <-- fixed
-    this.ws.on('open', () => console.log('[EventSub] WS open'));
-    this.ws.on('close', (code, reason) => {
-      console.log('[EventSub] WS closed', code, reason?.toString() || '');
-      setTimeout(() => this.connect(this.reconnectUrl || this.url), 2000);
-    });
-    this.ws.on('error', (err) => console.error('[EventSub] WS error', err.message));
+    this.ws = new WS(url);
+    this.ws.on('open', () => console.log('[EventSub] connected'));
+    this.ws.on('close', () => setTimeout(() => this.connect(this.reconnectUrl || this.url), 1500));
+    this.ws.on('error', (err) => console.error('[EventSub] error', err.message));
     this.ws.on('message', async (raw) => {
       try {
         const data = JSON.parse(raw.toString());
@@ -150,39 +146,34 @@ class EventSubWS {
 
         if (t === 'session_welcome') {
           this.sessionId = data?.payload?.session?.id;
-          console.log('[EventSub] Welcome. session_id=', this.sessionId);
           await this.ensureSubscriptions();
         } else if (t === 'session_reconnect') {
           this.reconnectUrl = data?.payload?.session?.reconnect_url;
-          console.log('[EventSub] Reconnect requested →', this.reconnectUrl);
-          this.stop();
-          this.connect(this.reconnectUrl);
+          this.stop(); this.connect(this.reconnectUrl);
         } else if (t === 'notification') {
-          const subType = data?.metadata?.subscription_type;
+          const type = data?.metadata?.subscription_type;
           const event = data?.payload?.event;
 
-          if (subType === 'channel.channel_points_custom_reward_redemption.add') {
-            const redId = event?.id;
-            const user = event?.user_name || event?.user_login || 'unknown';
-            const title = event?.reward?.title || '';
-            const rewardId = event?.reward?.id;
-            const key = norm(title);
+          if (type === 'channel.channel_points_custom_reward_redemption.add') {
+            const key = norm(event?.reward?.title || '');
             const delta = REWARD_MAP[key] ?? REWARD_MAP[stripEmoji(key)] ?? 0;
-            if (!delta) { console.log(`[PENDING] Ignored unmapped reward "${title}" from ${user}`); return; }
+            if (!delta) return;
             await store.pendingAdd({
-              id: redId, user, title, delta,
-              reward_id: rewardId, broadcaster_id: this.broadcasterId, at: Date.now(),
+              id: event?.id,
+              user: event?.user_name || event?.user_login || 'unknown',
+              title: event?.reward?.title || '',
+              delta,
+              reward_id: event?.reward?.id,
+              broadcaster_id: this.broadcasterId,
+              at: Date.now(),
               status: 'UNFULFILLED'
             });
-            console.log(`[PENDING] Added "${title}" by ${user} (delta ${delta}) id=${redId}`);
-            io.emit('karma:pending', { id: redId, user, title, delta });
           }
 
-          if (subType === 'channel.channel_points_custom_reward_redemption.update') {
+          if (type === 'channel.channel_points_custom_reward_redemption.update') {
             const redId = event?.id;
-            const status = (event?.status || '').toUpperCase(); // FULFILLED | CANCELED
+            const status = (event?.status || '').toUpperCase();
             const rec = await store.pendingGet(redId);
-            console.log(`[UPDATE] Redemption id=${redId} status=${status}`);
             if (!rec) return;
             if (status === 'FULFILLED') {
               const value = await store.applyDelta(rec.user, rec.delta);
@@ -190,44 +181,35 @@ class EventSubWS {
               await store.pendingDelete(redId);
             } else if (status === 'CANCELED') {
               await store.pendingDelete(redId);
-              console.log(`[PENDING] Canceled "${rec.title}" by ${rec.user} → removed`);
             }
           }
         }
-      } catch (e) { console.error('[EventSub] parse error', e); }
+      } catch (e) {
+        console.error('[EventSub] parse', e.message);
+      }
     });
   }
 
   async ensureSubscriptions() {
     if (!this.sessionId) return;
     try {
-      const list = await this.apiListSubs();
-      const toDelete = (list.data || []).filter(s =>
-        ['channel.channel_points_custom_reward_redemption.add',
-         'channel.channel_points_custom_reward_redemption.update'
-        ].includes(s.type) && s.transport?.method === 'websocket'
+      const exist = await this.apiListSubs();
+      const toDelete = (exist.data || []).filter(s =>
+        ['channel.channel_points_custom_reward_redemption.add','channel.channel_points_custom_reward_redemption.update']
+          .includes(s.type) && s.transport?.method === 'websocket'
       );
       for (const s of toDelete) await this.apiDeleteSub(s.id);
-    } catch (e) { console.warn('[EventSub] list/delete subs:', e.message); }
+    } catch (e) { /* ignore */ }
 
-    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.add', '1', {
-      broadcaster_user_id: this.broadcasterId
-    });
-    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.update', '1', {
-      broadcaster_user_id: this.broadcasterId
-    });
-    console.log('[EventSub] Subscribed to redemption ADD + UPDATE');
+    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.add', '1', { broadcaster_user_id: this.broadcasterId });
+    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.update', '1', { broadcaster_user_id: this.broadcasterId });
+    console.log('[EventSub] subscriptions ready');
   }
-
   async apiCreateSub(type, version, condition) {
     const body = { type, version, condition, transport: { method: 'websocket', session_id: this.sessionId } };
     const res = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
       method: 'POST',
-      headers: {
-        'Client-ID': CLIENT_ID,
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     if (!res.ok) throw new Error(`CreateSub ${type} failed: ${res.status} ${await res.text()}`);
@@ -249,9 +231,15 @@ class EventSubWS {
   }
 }
 
-/* ========== CORS + JSON ========== */
+/* ───────────────────────── App & CORS ───────────────────────── */
+const app = express();
+app.set('trust proxy', 1);
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin || '';
+  if (!ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.length ? origin : '*');
+  }
+  res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
@@ -259,34 +247,25 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-/* ========== Socket.IO + Server ========== */
+/* ───────────────────────── Socket.IO ───────────────────────── */
 const server = http.createServer(app);
-const io = new SocketIOServer(server, { cors: { origin: '*' } });
-
+const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
 function broadcastUpdate(user, value, delta, source) {
   io.emit('karma:update', { user, value, delta, source, at: Date.now() });
-  console.log(`[KARMA] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value} (${source})`);
+  console.log(`[karma] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value}`);
 }
 
-/* ========== Routes ========== */
-app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (oauth-debug-fixed) running.'));
-
+/* ───────────────────────── Routes ───────────────────────── */
+app.get('/health', (req, res) => res.type('text/plain').send('ok'));
+app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (prod)'));
 app.get('/auth/login', (req, res) => {
   if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET');
-  const url = authURL();
-  console.log('[AUTH] redirecting to', url);
-  res.redirect(url);
+  res.redirect(authURL());
 });
-
 app.get('/auth/callback', async (req, res) => {
   const { code, state } = req.query;
-  console.log('[CALLBACK] hit', { hasCode: !!code, state, url: req.originalUrl, proto: req.headers['x-forwarded-proto'] });
-  if (!code) {
-    return res
-      .status(400)
-      .type('text/html')
-      .send(`<h1>Callback reached but no ?code</h1><p>URL: ${escapeHtml(req.originalUrl)}</p><p>Check Twitch Redirect URL & PUBLIC_URL.</p>`);
-  }
+  if (!code) return res.status(400).type('text/html').send('<h1>Missing code</h1>');
+  if (!isStateValid(state)) return res.status(400).type('text/html').send('<h1>Invalid state</h1>');
   try {
     const tok = await exchangeCodeForToken(code);
     const info = await getUserInfo(tok.access_token);
@@ -300,35 +279,28 @@ app.get('/auth/callback', async (req, res) => {
     };
     await store.saveTokens(data);
     await startEventSubWithTokens(data);
-    res
-      .status(200)
-      .type('text/html')
-      .send('<h1>Auth successful ✅</h1><p>You can close this window.</p>');
+    res.type('text/html').send('<h1>Auth successful</h1>');
   } catch (e) {
-    console.error('[AUTH] error', e);
-    res.status(500).type('text/html').send(`<h1>Auth error</h1><pre>${escapeHtml(e.message)}</pre>`);
+    console.error('[auth]', e.message);
+    res.status(500).type('text/html').send('<h1>Auth error</h1>');
   }
 });
-
 app.get('/api/karma', async (req, res) => res.json(await store.getAll()));
 app.get('/api/karma/pending', async (req, res) => res.json(await store.pendingAll()));
 app.get('/api/karma/:user', async (req, res) => res.json({ user: req.params.user, value: await store.getUser(req.params.user) }));
-
 app.use('/overlay', express.static(path.join(__dirname, 'public')));
 
+/* ───────────────────────── Server ───────────────────────── */
 server.listen(PORT, () => {
   console.log(`HTTP + Socket.IO on port ${PORT}`);
-  boot().catch(e => console.error('[BOOT] error', e));
+  boot().catch(e => console.error('[boot]', e.message));
 });
 
-/* ========== Boot ========== */
+/* ───────────────────────── Boot ───────────────────────── */
 let eventsub = null;
 async function boot() {
   let tokens = await store.loadTokens();
-  if (!tokens) {
-    console.log(`Open ${redirectUri()} /auth/login to authorize.`);
-    return;
-  }
+  if (!tokens) { console.log('Authorize at', redirectUri(), '/auth/login'); return; }
   if (tokens.refresh_token) {
     try {
       const rt = await refreshToken(tokens.refresh_token);
@@ -336,24 +308,18 @@ async function boot() {
       tokens.refresh_token = rt.refresh_token || tokens.refresh_token;
       await store.saveTokens(tokens);
     } catch (e) {
-      console.warn('[BOOT] Refresh failed, requiring re-auth:', e.message);
-      console.log(`Open ${redirectUri()} /auth/login to authorize.`);
+      console.warn('[boot] refresh failed:', e.message);
+      console.log('Re-authorize at', redirectUri(), '/auth/login');
       return;
     }
   }
   await startEventSubWithTokens(tokens);
 }
-
 async function startEventSubWithTokens(tokens) {
   const info = await getUserInfo(tokens.access_token);
   const bId = info.id;
-  console.log('[BOOT] EventSub for broadcaster', info.login, `(${bId})`);
+  console.log('[boot] EventSub for', info.login, `(${bId})`);
   if (eventsub) eventsub.stop();
   eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
   eventsub.start();
-}
-
-/* ========== Helpers ========== */
-function escapeHtml(s='') {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
