@@ -10,6 +10,10 @@ import { createStore } from './storage.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
+// Render is behind a proxy
+const app = express();
+app.set('trust proxy', 1);
+
 /* ========== .env loader (local dev) ========== */
 const dotenvPath = path.join(__dirname, '.env');
 if (fs.existsSync(dotenvPath)) {
@@ -26,7 +30,7 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const BROADCASTER_LOGIN = (process.env.BROADCASTER_LOGIN || '').toLowerCase();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g., https://doomz-xxxxx.onrender.com
+const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/,'');
 
 /* ========== Normalize + Reward mapping ========== */
 const norm = (s) => (s || '').toString()
@@ -56,9 +60,7 @@ function buildNormalizedMap(raw) {
 let RAW_REWARD_MAP = DEFAULT_REWARD_MAP;
 try {
   if (process.env.REWARD_MAP_JSON) RAW_REWARD_MAP = JSON.parse(process.env.REWARD_MAP_JSON);
-} catch (e) {
-  console.warn('[WARN] Invalid REWARD_MAP_JSON, using defaults. Reason:', e.message);
-}
+} catch (e) { console.warn('[WARN] Invalid REWARD_MAP_JSON:', e.message); }
 const REWARD_MAP = buildNormalizedMap(RAW_REWARD_MAP);
 
 /* ========== Stores ========== */
@@ -68,23 +70,26 @@ await store.init();
 /* ========== HTTP helper ========== */
 async function fetchJSON(urlStr, options = {}) {
   const res = await fetch(urlStr, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text().catch(()=>'[no text]');
+    throw new Error(`HTTP ${res.status}: ${text}`);
+  }
   return res.json();
 }
 
 /* ========== OAuth ========== */
-const SCOPES = ['channel:read:redemptions']; // read-only flow
+const SCOPES = ['channel:read:redemptions'];
 function redirectUri() {
   const base = PUBLIC_URL || `http://localhost:${PORT}`;
-  return `${base.replace(/\/+$/,'')}/auth/callback`;
+  return `${base}/auth/callback`;
 }
 function authURL() {
   const params = new URLSearchParams({
     client_id: CLIENT_ID,
     redirect_uri: redirectUri(),
     response_type: 'code',
-    scope: SCOPES.join(' '),
-    force_verify: 'true'
+    scope: SCOPES.join(' ')
+    // force_verify removed to avoid certain loops
   });
   return `https://id.twitch.tv/oauth2/authorize?${params.toString()}`;
 }
@@ -131,7 +136,7 @@ class EventSubWS {
 
   connect(url) {
     console.log('[EventSub] Connecting:', url);
-    this.ws = new WebSocket(url);
+    this.ws = new (await import('ws')).WebSocket(url);
     this.ws.on('open', () => console.log('[EventSub] WS open'));
     this.ws.on('close', (code, reason) => {
       console.log('[EventSub] WS closed', code, reason?.toString() || '');
@@ -163,19 +168,14 @@ class EventSubWS {
             const rewardId = event?.reward?.id;
             const key = norm(title);
             const delta = REWARD_MAP[key] ?? REWARD_MAP[stripEmoji(key)] ?? 0;
-            if (!delta) {
-              console.log(`[PENDING] Ignored unmapped reward "${title}" from ${user}`);
-              return;
-            }
+            if (!delta) { console.log(`[PENDING] Ignored unmapped reward "${title}" from ${user}`); return; }
             await store.pendingAdd({
               id: redId, user, title, delta,
-              reward_id: rewardId,
-              broadcaster_id: this.broadcasterId,
-              at: Date.now(),
+              reward_id: rewardId, broadcaster_id: this.broadcasterId, at: Date.now(),
               status: 'UNFULFILLED'
             });
             console.log(`[PENDING] Added "${title}" by ${user} (delta ${delta}) id=${redId}`);
-            io && io.emit('karma:pending', { id: redId, user, title, delta });
+            io.emit('karma:pending', { id: redId, user, title, delta });
           }
 
           if (subType === 'channel.channel_points_custom_reward_redemption.update') {
@@ -194,9 +194,7 @@ class EventSubWS {
             }
           }
         }
-      } catch (e) {
-        console.error('[EventSub] parse error', e);
-      }
+      } catch (e) { console.error('[EventSub] parse error', e); }
     });
   }
 
@@ -210,9 +208,7 @@ class EventSubWS {
         ].includes(s.type) && s.transport?.method === 'websocket'
       );
       for (const s of toDelete) await this.apiDeleteSub(s.id);
-    } catch (e) {
-      console.warn('[EventSub] list/delete subs:', e.message);
-    }
+    } catch (e) { console.warn('[EventSub] list/delete subs:', e.message); }
 
     await this.apiCreateSub('channel.channel_points_custom_reward_redemption.add', '1', {
       broadcaster_user_id: this.broadcasterId
@@ -253,8 +249,7 @@ class EventSubWS {
   }
 }
 
-/* ========== HTTP + Socket.IO ========== */
-const app = express();
+/* ========== CORS + JSON ========== */
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -264,20 +259,34 @@ app.use((req, res, next) => {
 });
 app.use(express.json());
 
-let io = null;
+/* ========== Socket.IO + Server ========== */
+const server = http.createServer(app);
+const io = new SocketIOServer(server, { cors: { origin: '*' } });
+
 function broadcastUpdate(user, value, delta, source) {
-  if (io) io.emit('karma:update', { user, value, delta, source, at: Date.now() });
+  io.emit('karma:update', { user, value, delta, source, at: Date.now() });
   console.log(`[KARMA] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value} (${source})`);
 }
 
 /* ========== Routes ========== */
-app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (cloud-ready) running.'));
+app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (oauth-debug) running.'));
+
 app.get('/auth/login', (req, res) => {
-  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET in env');
-  res.redirect(authURL());
+  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET');
+  const url = authURL();
+  console.log('[AUTH] redirecting to', url);
+  res.redirect(url);
 });
+
 app.get('/auth/callback', async (req, res) => {
-  const code = req.query.code;
+  const { code, state } = req.query;
+  console.log('[CALLBACK] hit', { hasCode: !!code, state, url: req.originalUrl, headers: req.headers['x-forwarded-proto'] });
+  if (!code) {
+    return res
+      .status(400)
+      .type('text/html')
+      .send(`<h1>Callback reached but no ?code</h1><p>URL: ${escapeHtml(req.originalUrl)}</p><p>Check Twitch Redirect URL & PUBLIC_URL.</p>`);
+  }
   try {
     const tok = await exchangeCodeForToken(code);
     const info = await getUserInfo(tok.access_token);
@@ -291,10 +300,13 @@ app.get('/auth/callback', async (req, res) => {
     };
     await store.saveTokens(data);
     await startEventSubWithTokens(data);
-    res.send('<h1>Auth successful</h1><p>You can close this window and return to the app.</p>');
+    res
+      .status(200)
+      .type('text/html')
+      .send('<h1>Auth successful ✅</h1><p>You can close this window.</p>');
   } catch (e) {
     console.error('[AUTH] error', e);
-    res.status(500).send('Auth error: ' + e.message);
+    res.status(500).type('text/html').send(`<h1>Auth error</h1><pre>${escapeHtml(e.message)}</pre>`);
   }
 });
 
@@ -304,20 +316,17 @@ app.get('/api/karma/:user', async (req, res) => res.json({ user: req.params.user
 
 app.use('/overlay', express.static(path.join(__dirname, 'public')));
 
-/* ========== Server ========== */
-const server = http.createServer(app);
-io = new SocketIOServer(server, { cors: { origin: '*' } });
-
 server.listen(PORT, () => {
   console.log(`HTTP + Socket.IO on port ${PORT}`);
   boot().catch(e => console.error('[BOOT] error', e));
 });
 
 /* ========== Boot ========== */
+let eventsub = null;
 async function boot() {
   let tokens = await store.loadTokens();
   if (!tokens) {
-    console.log(`Open ${redirectUri().replace('0.0.0.0','localhost')} /auth/login to authorize.`);
+    console.log(`Open ${redirectUri()} /auth/login to authorize.`);
     return;
   }
   if (tokens.refresh_token) {
@@ -328,14 +337,13 @@ async function boot() {
       await store.saveTokens(tokens);
     } catch (e) {
       console.warn('[BOOT] Refresh failed, requiring re-auth:', e.message);
-      console.log(`Open ${redirectUri()} to authorize.`);
+      console.log(`Open ${redirectUri()} /auth/login to authorize.`);
       return;
     }
   }
   await startEventSubWithTokens(tokens);
 }
 
-let eventsub = null;
 async function startEventSubWithTokens(tokens) {
   const info = await getUserInfo(tokens.access_token);
   const bId = info.id;
@@ -343,4 +351,9 @@ async function startEventSubWithTokens(tokens) {
   if (eventsub) eventsub.stop();
   eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
   eventsub.start();
+}
+
+/* ========== Helpers ========== */
+function escapeHtml(s='') {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
