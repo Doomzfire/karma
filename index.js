@@ -2,7 +2,7 @@ import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import fetch from 'node-fetch';
-import { WebSocket } from 'ws';
+import { WebSocket as WS } from 'ws'; // <-- static import (fix)
 import fs from 'fs';
 import path from 'path';
 import url from 'url';
@@ -136,7 +136,7 @@ class EventSubWS {
 
   connect(url) {
     console.log('[EventSub] Connecting:', url);
-    this.ws = new (await import('ws')).WebSocket(url);
+    this.ws = new WS(url); // <-- fixed
     this.ws.on('open', () => console.log('[EventSub] WS open'));
     this.ws.on('close', (code, reason) => {
       console.log('[EventSub] WS closed', code, reason?.toString() || '');
@@ -269,7 +269,7 @@ function broadcastUpdate(user, value, delta, source) {
 }
 
 /* ========== Routes ========== */
-app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (oauth-debug) running.'));
+app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (oauth-debug-fixed) running.'));
 
 app.get('/auth/login', (req, res) => {
   if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET');
@@ -280,7 +280,7 @@ app.get('/auth/login', (req, res) => {
 
 app.get('/auth/callback', async (req, res) => {
   const { code, state } = req.query;
-  console.log('[CALLBACK] hit', { hasCode: !!code, state, url: req.originalUrl, headers: req.headers['x-forwarded-proto'] });
+  console.log('[CALLBACK] hit', { hasCode: !!code, state, url: req.originalUrl, proto: req.headers['x-forwarded-proto'] });
   if (!code) {
     return res
       .status(400)
