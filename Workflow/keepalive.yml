@@ -1,0 +1,57 @@
+name: Keep Render Awake When Live
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # toutes les 5 minutes
+  workflow_dispatch:        # déclenchement manuel possible
+
+env:
+  TWITCH_LOGIN: doomzfire
+  # URL à "réveiller" côté Render (utilise une route qui existe dans ton service)
+  RENDER_PING_URL: https://doomz-karma-service.onrender.com/api/karma
+
+jobs:
+  ping-if-live:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: keepalive-live-only
+      cancel-in-progress: true
+    steps:
+      - name: Installer jq (au cas où)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Obtenir un App Access Token Twitch
+        id: token
+        env:
+          CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+        run: |
+          set -e
+          RESP=$(curl -s -X POST "https://id.twitch.tv/oauth2/token"             -d "client_id=$CLIENT_ID"             -d "client_secret=$CLIENT_SECRET"             -d "grant_type=client_credentials")
+          TOKEN=$(echo "$RESP" | jq -r .access_token)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "Réponse Twitch: $RESP"
+            echo "Impossible d'obtenir un token" >&2
+            exit 1
+          fi
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Vérifier si le channel est LIVE
+        id: live
+        env:
+          TOKEN: ${{ steps.token.outputs.token }}
+          CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_LOGIN: ${{ env.TWITCH_LOGIN }}
+        run: |
+          DATA=$(curl -s -H "Client-ID: $CLIENT_ID"                        -H "Authorization: Bearer $TOKEN"                        "https://api.twitch.tv/helix/streams?user_login=$TWITCH_LOGIN")
+          LIVE_COUNT=$(echo "$DATA" | jq '.data | length')
+          echo "is_live=$LIVE_COUNT" >> $GITHUB_OUTPUT
+          echo "Twitch response: $DATA"
+
+      - name: Ping Render si LIVE
+        if: steps.live.outputs.is_live != '0'
+        env:
+          RENDER_PING_URL: ${{ env.RENDER_PING_URL }}
+        run: |
+          echo "LIVE détecté → wake up Render: $RENDER_PING_URL"
+          curl -sS -H "Cache-Control: no-cache" "$RENDER_PING_URL" || true
