@@ -3,7 +3,6 @@ import path from 'path';
 import pkg from 'pg';
 const { Pool } = pkg;
 
-// ✅ Export de la fonction createStore
 export async function createStore({ __dirname, DATABASE_URL }) {
   if (DATABASE_URL) {
     const pg = new PgStore(DATABASE_URL);
@@ -151,6 +150,7 @@ class PgStore {
   }
 
   async saveTokens(obj){
+    // Forcer id à 1 pour éviter float
     await this.pool.query(
       `insert into tokens (id, data) values (1, $1)
        on conflict (id) do update set data = excluded.data`,
@@ -165,8 +165,10 @@ class PgStore {
 
   // Pending
   async pendingAdd(rec){
-    // ⚠️ Forcer delta en nombre pour éviter l'erreur Postgres
+    // ⚠️ Forcer delta en nombre
     if (typeof rec.delta === 'string') rec.delta = parseFloat(rec.delta);
+    // Forcer at en bigint
+    if (typeof rec.at === 'string') rec.at = BigInt(rec.at);
 
     await this.pool.query(
       `insert into pending (id, user_name, title, delta, reward_id, broadcaster_id, at, status)
@@ -192,7 +194,7 @@ class PgStore {
       delta: parseFloat(r.rows[0].delta),
       reward_id: r.rows[0].reward_id,
       broadcaster_id: r.rows[0].broadcaster_id,
-      at: r.rows[0].at,
+      at: BigInt(r.rows[0].at),
       status: r.rows[0].status
     };
   }
@@ -207,7 +209,7 @@ class PgStore {
         delta: parseFloat(row.delta),
         reward_id: row.reward_id,
         broadcaster_id: row.broadcaster_id,
-        at: row.at,
+        at: BigInt(row.at),
         status: row.status
       };
     }
