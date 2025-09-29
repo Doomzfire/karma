@@ -2,16 +2,15 @@ import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import fetch from 'node-fetch';
-import { WebSocket as WS } from 'ws';
+import { WebSocket } from 'ws';
 import fs from 'fs';
 import path from 'path';
 import url from 'url';
-import crypto from 'crypto';
 import { createStore } from './storage.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
-/* ───────────────────────── .env (local) ───────────────────────── */
+/* ========== .env loader (local dev) ========== */
 const dotenvPath = path.join(__dirname, '.env');
 if (fs.existsSync(dotenvPath)) {
   const lines = fs.readFileSync(dotenvPath, 'utf8').split(/\r?\n/);
@@ -21,27 +20,29 @@ if (fs.existsSync(dotenvPath)) {
   }
 }
 
-/* ───────────────────────── Config ───────────────────────── */
+/* ========== Config ========== */
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const BROADCASTER_LOGIN = (process.env.BROADCASTER_LOGIN || '').toLowerCase();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const DATABASE_URL = process.env.DATABASE_URL || '';
-const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/,'');
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-const ADMIN_KEY = process.env.ADMIN_KEY || ''; // enable admin API
+const PUBLIC_URL = process.env.PUBLIC_URL || ''; // e.g., https://doomz-railway.up.railway.app
 
-/* ───────────────────────── Reward mapping ───────────────────────── */
-const norm = (s) => (s || '').toString().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+/* ========== Normalize + Reward mapping ========== */
+const norm = (s) => (s || '').toString()
+  .normalize('NFKD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .trim();
 const stripEmoji = (s) => s.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, '').trim();
+
 const DEFAULT_REWARD_MAP = {
-  "🔥👋A Hello!👋🔥": 0.01, "hello": 0.01,
-  "heal💓": 0.075, "heal": 0.075,
-  "eat🍏": 0.05, "eat": 0.05,
-  "hydrate💧": 0.025, "hydrate": 0.025,
-  "bleed🩸": -0.01, "bleed": -0.01,
-  "thirst🥵": -0.025, "thirst": -0.025,
-  "hunger🦴": -0.05, "hunger": -0.05
+  "heal💓": 1, "heal": 1,
+  "eat🍏": 1, "eat": 1,
+  "hydrate💧": 1, "hydrate": 1,
+  "bleed🩸": -1, "bleed": -1,
+  "thirst🥵": -1, "thirst": -1,
+  "hunger🦴": -1, "hunger": -1
 };
 function buildNormalizedMap(raw) {
   const out = {};
@@ -53,37 +54,29 @@ function buildNormalizedMap(raw) {
   return out;
 }
 let RAW_REWARD_MAP = DEFAULT_REWARD_MAP;
-try { if (process.env.REWARD_MAP_JSON) RAW_REWARD_MAP = JSON.parse(process.env.REWARD_MAP_JSON); } catch {}
+try {
+  if (process.env.REWARD_MAP_JSON) RAW_REWARD_MAP = JSON.parse(process.env.REWARD_MAP_JSON);
+} catch (e) {
+  console.warn('[WARN] Invalid REWARD_MAP_JSON, using defaults. Reason:', e.message);
+}
 const REWARD_MAP = buildNormalizedMap(RAW_REWARD_MAP);
 
-/* ───────────────────────── Stores ───────────────────────── */
+/* ========== Stores ========== */
 const store = await createStore({ __dirname, DATABASE_URL });
 await store.init();
 
-/* ───────────────────────── Helpers ───────────────────────── */
+/* ========== HTTP helper ========== */
 async function fetchJSON(urlStr, options = {}) {
   const res = await fetch(urlStr, options);
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(\`HTTP \${res.status}: \${await res.text()}\`);
   return res.json();
 }
-function redirectUri() {
-  const base = PUBLIC_URL || `http://localhost:${PORT}`;
-  return `${base}/auth/callback`
-}
 
-/* ───────────────────────── OAuth with state ───────────────────────── */
-const SCOPES = ['channel:read:redemptions'];
-const stateStore = new Map(); // state -> expiresAt
-function makeState() {
-  const s = crypto.randomBytes(16).toString('hex');
-  stateStore.set(s, Date.now() + 10 * 60 * 1000);
-  return s;
-}
-function isStateValid(s) {
-  const exp = stateStore.get(s);
-  if (!exp) return false;
-  stateStore.delete(s);
-  return exp > Date.now();
+/* ========== OAuth ========== */
+const SCOPES = ['channel:read:redemptions']; // read-only flow
+function redirectUri() {
+  const base = PUBLIC_URL || \`http://localhost:\${PORT}\`;
+  return \`\${base.replace(/\/+\$/,'')}/auth/callback\`;
 }
 function authURL() {
   const params = new URLSearchParams({
@@ -91,9 +84,9 @@ function authURL() {
     redirect_uri: redirectUri(),
     response_type: 'code',
     scope: SCOPES.join(' '),
-    state: makeState()
+    force_verify: 'true'
   });
-  return `https://id.twitch.tv/oauth2/authorize?${params.toString()}`;
+  return \`https://id.twitch.tv/oauth2/authorize?\${params.toString()}\`;
 }
 async function exchangeCodeForToken(code) {
   const params = new URLSearchParams({
@@ -116,14 +109,14 @@ async function refreshToken(refresh_token) {
 }
 async function getUserInfo(access_token) {
   const res = await fetch('https://api.twitch.tv/helix/users', {
-    headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${access_token}` }
+    headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${access_token}\` }
   });
-  if (!res.ok) throw new Error(`getUserInfo failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(\`getUserInfo failed: \${res.status} \${await res.text()}\`);
   const j = await res.json();
   return j.data && j.data[0];
 }
 
-/* ───────────────────────── EventSub WS ───────────────────────── */
+/* ========== EventSub WebSocket ========== */
 class EventSubWS {
   constructor({ accessToken, broadcasterId }) {
     this.accessToken = accessToken;
@@ -137,10 +130,14 @@ class EventSubWS {
   stop() { if (this.ws) this.ws.close(); this.ws = null; this.sessionId = null; this.reconnectUrl = null; }
 
   connect(url) {
-    this.ws = new WS(url);
-    this.ws.on('open', () => console.log('[EventSub] connected'));
-    this.ws.on('close', () => setTimeout(() => this.connect(this.reconnectUrl || this.url), 1500));
-    this.ws.on('error', (err) => console.error('[EventSub] error', err.message));
+    console.log('[EventSub] Connecting:', url);
+    this.ws = new WebSocket(url);
+    this.ws.on('open', () => console.log('[EventSub] WS open'));
+    this.ws.on('close', (code, reason) => {
+      console.log('[EventSub] WS closed', code, reason?.toString() || '');
+      setTimeout(() => this.connect(this.reconnectUrl || this.url), 2000);
+    });
+    this.ws.on('error', (err) => console.error('[EventSub] WS error', err.message));
     this.ws.on('message', async (raw) => {
       try {
         const data = JSON.parse(raw.toString());
@@ -148,46 +145,57 @@ class EventSubWS {
 
         if (t === 'session_welcome') {
           this.sessionId = data?.payload?.session?.id;
+          console.log('[EventSub] Welcome. session_id=', this.sessionId);
           await this.ensureSubscriptions();
         } else if (t === 'session_reconnect') {
           this.reconnectUrl = data?.payload?.session?.reconnect_url;
-          this.stop(); this.connect(this.reconnectUrl);
+          console.log('[EventSub] Reconnect requested →', this.reconnectUrl);
+          this.stop();
+          this.connect(this.reconnectUrl);
         } else if (t === 'notification') {
-          const type = data?.metadata?.subscription_type;
+          const subType = data?.metadata?.subscription_type;
           const event = data?.payload?.event;
 
-          if (type === 'channel.channel_points_custom_reward_redemption.add') {
-            const key = norm(event?.reward?.title || '');
+          if (subType === 'channel.channel_points_custom_reward_redemption.add') {
+            const redId = event?.id;
+            const user = event?.user_name || event?.user_login || 'unknown';
+            const title = event?.reward?.title || '';
+            const rewardId = event?.reward?.id;
+            const key = norm(title);
             const delta = REWARD_MAP[key] ?? REWARD_MAP[stripEmoji(key)] ?? 0;
-            if (!delta) return;
+            if (!delta) {
+              console.log(\`[PENDING] Ignored unmapped reward "\${title}" from \${user}\`);
+              return;
+            }
             await store.pendingAdd({
-              id: event?.id,
-              user: event?.user_name || event?.user_login || 'unknown',
-              title: event?.reward?.title || '',
-              delta,
-              reward_id: event?.reward?.id,
+              id: redId, user, title, delta,
+              reward_id: rewardId,
               broadcaster_id: this.broadcasterId,
               at: Date.now(),
               status: 'UNFULFILLED'
             });
+            console.log(\`[PENDING] Added "\${title}" by \${user} (delta \${delta}) id=\${redId}\`);
+            io && io.emit('karma:pending', { id: redId, user, title, delta });
           }
 
-          if (type === 'channel.channel_points_custom_reward_redemption.update') {
+          if (subType === 'channel.channel_points_custom_reward_redemption.update') {
             const redId = event?.id;
-            const status = (event?.status || '').toUpperCase();
+            const status = (event?.status || '').toUpperCase(); // FULFILLED | CANCELED
             const rec = await store.pendingGet(redId);
+            console.log(\`[UPDATE] Redemption id=\${redId} status=\${status}\`);
             if (!rec) return;
             if (status === 'FULFILLED') {
               const value = await store.applyDelta(rec.user, rec.delta);
-              broadcastUpdate(rec.user, value, rec.delta, `reward:${rec.title}`);
+              broadcastUpdate(rec.user, value, rec.delta, \`reward:\${rec.title}\`);
               await store.pendingDelete(redId);
             } else if (status === 'CANCELED') {
               await store.pendingDelete(redId);
+              console.log(\`[PENDING] Canceled "\${rec.title}" by \${rec.user} → removed\`);
             }
           }
         }
       } catch (e) {
-        console.error('[EventSub] parse', e.message);
+        console.error('[EventSub] parse error', e);
       }
     });
   }
@@ -195,79 +203,81 @@ class EventSubWS {
   async ensureSubscriptions() {
     if (!this.sessionId) return;
     try {
-      const exist = await this.apiListSubs();
-      const toDelete = (exist.data || []).filter(s =>
-        ['channel.channel_points_custom_reward_redemption.add','channel.channel_points_custom_reward_redemption.update']
-          .includes(s.type) && s.transport?.method === 'websocket'
+      const list = await this.apiListSubs();
+      const toDelete = (list.data || []).filter(s =>
+        ['channel.channel_points_custom_reward_redemption.add',
+         'channel.channel_points_custom_reward_redemption.update'
+        ].includes(s.type) && s.transport?.method === 'websocket'
       );
       for (const s of toDelete) await this.apiDeleteSub(s.id);
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.warn('[EventSub] list/delete subs:', e.message);
+    }
 
-    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.add', '1', { broadcaster_user_id: this.broadcasterId });
-    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.update', '1', { broadcaster_user_id: this.broadcasterId });
-    console.log('[EventSub] subscriptions ready');
+    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.add', '1', {
+      broadcaster_user_id: this.broadcasterId
+    });
+    await this.apiCreateSub('channel.channel_points_custom_reward_redemption.update', '1', {
+      broadcaster_user_id: this.broadcasterId
+    });
+    console.log('[EventSub] Subscribed to redemption ADD + UPDATE');
   }
+
   async apiCreateSub(type, version, condition) {
     const body = { type, version, condition, transport: { method: 'websocket', session_id: this.sessionId } };
     const res = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
       method: 'POST',
-      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}`, 'Content-Type': 'application/json' },
+      headers: {
+        'Client-ID': CLIENT_ID,
+        'Authorization': \`Bearer \${this.accessToken}\`,
+        'Content-Type': 'application/json'
+      },
       body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`CreateSub ${type} failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new Error(\`CreateSub \${type} failed: \${res.status} \${await res.text()}\`);
     return res.json();
   }
   async apiListSubs() {
     const res = await fetch('https://api.twitch.tv/helix/eventsub/subscriptions', {
-      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}` }
+      headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${this.accessToken}\` }
     });
-    if (!res.ok) throw new Error(`ListSub failed ${res.status}`);
+    if (!res.ok) throw new Error(\`ListSub failed \${res.status}\`);
     return res.json();
   }
   async apiDeleteSub(id) {
-    const res = await fetch(`https://api.twitch.tv/helix/eventsub/subscriptions?id=${encodeURIComponent(id)}`, {
+    const res = await fetch(\`https://api.twitch.tv/helix/eventsub/subscriptions?id=\${encodeURIComponent(id)}\`, {
       method: 'DELETE',
-      headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${this.accessToken}` }
+      headers: { 'Client-ID': CLIENT_ID, 'Authorization': \`Bearer \${this.accessToken}\` }
     });
-    if (!res.ok) throw new Error(`DeleteSub failed ${res.status}`);
+    if (!res.ok) throw new Error(\`DeleteSub failed \${res.status}\`);
   }
 }
 
-/* ───────────────────────── App & CORS ───────────────────────── */
+/* ========== HTTP + Socket.IO ========== */
 const app = express();
-app.set('trust proxy', 1);
 app.use((req, res, next) => {
-  const origin = req.headers.origin || '';
-  if (!ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGINS.length ? origin : '*');
-  }
-  res.setHeader('Vary', 'Origin');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-admin-key');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
 app.use(express.json());
 
-/* ───────────────────────── Socket.IO (DECLARE ONCE) ───────────────────────── */
-const server = http.createServer(app);
-const io = new SocketIOServer(server, { cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : '*' } });
+let io = null;
 function broadcastUpdate(user, value, delta, source) {
-  io.emit('karma:update', { user, value, delta, source, at: Date.now() });
-  console.log(`[karma] ${user} ${delta >= 0 ? '+' : ''}${delta} -> ${value} (${source})`);
+  if (io) io.emit('karma:update', { user, value, delta, source, at: Date.now() });
+  console.log(\`[KARMA] \${user} \${delta >= 0 ? '+' : ''}\${delta} -> \${value} (\${source})\`);
 }
 
-/* ───────────────────────── Routes (public) ───────────────────────── */
-app.get('/health', (req, res) => res.type('text/plain').send('ok'));
-app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (prod + admin)'));
+/* ========== Routes ========== */
+app.get('/', (req, res) => res.type('text/plain').send('Doomz Karma Service (cloud-ready) running.'));
 app.get('/auth/login', (req, res) => {
-  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET');
+  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(400).send('Missing CLIENT_ID/CLIENT_SECRET in env');
   res.redirect(authURL());
 });
 app.get('/auth/callback', async (req, res) => {
-  const { code, state } = req.query;
-  if (!code) return res.status(400).type('text/html').send('<h1>Missing code</h1>');
-  if (!isStateValid(state)) return res.status(400).type('text/html').send('<h1>Invalid state</h1>');
+  const code = req.query.code;
   try {
     const tok = await exchangeCodeForToken(code);
     const info = await getUserInfo(tok.access_token);
@@ -281,66 +291,35 @@ app.get('/auth/callback', async (req, res) => {
     };
     await store.saveTokens(data);
     await startEventSubWithTokens(data);
-    res.type('text/html').send('<h1>Auth successful</h1>');
+    res.send('<h1>Auth successful</h1><p>You can close this window and return to the app.</p>');
   } catch (e) {
-    console.error('[auth]', e.message);
-    res.status(500).type('text/html').send('<h1>Auth error</h1>');
+    console.error('[AUTH] error', e);
+    res.status(500).send('Auth error: ' + e.message);
   }
 });
+
 app.get('/api/karma', async (req, res) => res.json(await store.getAll()));
 app.get('/api/karma/pending', async (req, res) => res.json(await store.pendingAll()));
 app.get('/api/karma/:user', async (req, res) => res.json({ user: req.params.user, value: await store.getUser(req.params.user) }));
+
 app.use('/overlay', express.static(path.join(__dirname, 'public')));
 
-/* ───────────────────────── Admin middleware ───────────────────────── */
-function requireAdmin(req, res, next) {
-  if (!ADMIN_KEY) return res.status(503).json({ error: 'Admin API disabled (set ADMIN_KEY env var)' });
-  const key = req.headers['x-admin-key'] || req.query.key;
-  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'Unauthorized' });
-  next();
-}
+/* ========== Server ========== */
+const server = http.createServer(app);
+io = new SocketIOServer(server, { cors: { origin: '*' } });
 
-/* ───────────────────────── Admin endpoints ───────────────────────── */
-app.post('/api/admin/karma/reset/:user', requireAdmin, async (req, res) => {
-  const user = req.params.user;
-  const current = await store.getUser(user);
-  const delta = -current;
-  if (delta !== 0) {
-    const value = await store.applyDelta(user, delta);
-    broadcastUpdate(user, value, delta, 'admin:reset');
-    return res.json({ user, value, delta });
-  }
-  res.json({ user, value: current, delta: 0 });
+server.listen(PORT, () => {
+  console.log(\`HTTP + Socket.IO on port \${PORT}\`);
+  boot().catch(e => console.error('[BOOT] error', e));
 });
 
-app.post('/api/admin/karma/set/:user', requireAdmin, async (req, res) => {
-  const user = req.params.user;
-  let value = Number(req.body?.value);
-  if (!Number.isFinite(value)) return res.status(400).json({ error: 'Body { value:number } required' });
-  const current = await store.getUser(user);
-  const delta = value - current;
-  if (delta !== 0) {
-    const newVal = await store.applyDelta(user, delta);
-    broadcastUpdate(user, newVal, delta, 'admin:set');
-    return res.json({ user, value: newVal, delta });
-  }
-  res.json({ user, value: current, delta: 0 });
-});
-
-app.post('/api/admin/karma/add/:user', requireAdmin, async (req, res) => {
-  const user = req.params.user;
-  let delta = Number(req.body?.delta);
-  if (!Number.isFinite(delta) || delta === 0) return res.status(400).json({ error: 'Body { delta:number (non-zero) } required' });
-  const value = await store.applyDelta(user, delta);
-  broadcastUpdate(user, value, delta, 'admin:add');
-  res.json({ user, value, delta });
-});
-
-/* ───────────────────────── Boot + Listen ───────────────────────── */
-let eventsub = null;
+/* ========== Boot ========== */
 async function boot() {
   let tokens = await store.loadTokens();
-  if (!tokens) { console.log('Authorize at', redirectUri(), '/auth/login'); return; }
+  if (!tokens) {
+    console.log(\`Open \${redirectUri().replace('0.0.0.0','localhost')} /auth/login to authorize.\`);
+    return;
+  }
   if (tokens.refresh_token) {
     try {
       const rt = await refreshToken(tokens.refresh_token);
@@ -348,23 +327,20 @@ async function boot() {
       tokens.refresh_token = rt.refresh_token || tokens.refresh_token;
       await store.saveTokens(tokens);
     } catch (e) {
-      console.warn('[boot] refresh failed:', e.message);
-      console.log('Re-authorize at', redirectUri(), '/auth/login');
+      console.warn('[BOOT] Refresh failed, requiring re-auth:', e.message);
+      console.log(\`Open \${redirectUri()} to authorize.\`);
       return;
     }
   }
   await startEventSubWithTokens(tokens);
 }
+
+let eventsub = null;
 async function startEventSubWithTokens(tokens) {
   const info = await getUserInfo(tokens.access_token);
   const bId = info.id;
-  console.log('[boot] EventSub for', info.login, `(${bId})`);
+  console.log('[BOOT] EventSub for broadcaster', info.login, \`(\${bId})\`);
   if (eventsub) eventsub.stop();
   eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
   eventsub.start();
 }
-
-server.listen(PORT, () => {
-  console.log(`HTTP + Socket.IO on port ${PORT}`);
-  boot().catch(e => console.error('[boot]', e.message));
-});
