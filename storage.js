@@ -66,8 +66,12 @@ class JsonStore {
 }
 
 class PgStore {
-  constructor(DATABASE_URL){
-    this.pool = new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSLMODE ? { rejectUnauthorized: false } : undefined });
+  constructor(DATABASE_URL) {
+    const useSSL = process.env.NODE_ENV === 'production';
+    this.pool = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: useSSL ? { rejectUnauthorized: false } : false,
+    });
   }
   async init(){
     await this.pool.query(`
