@@ -115,7 +115,7 @@ class PgStore {
     return r.rows[0].value;
   }
   async setUser(user, value){
-    const v = Math.max(-5, Math.min(5, parseFloat(value) || 0));
+    const v = Math.max(-5, Math.min(5, parseInt(value, 10) || 0));
     await this.pool.query(
       `insert into karma (user_name, value) values ($1, $2)
        on conflict (user_name) do update set value = excluded.value`,
