@@ -1,8 +1,89 @@
+import fs from 'fs';
+import path from 'path';
+import pkg from 'pg';
+const { Pool } = pkg;
+
+// ✅ Export de la fonction createStore
+export async function createStore({ __dirname, DATABASE_URL }) {
+  if (DATABASE_URL) {
+    const pg = new PgStore(DATABASE_URL);
+    await pg.init();
+    return pg;
+  } else {
+    const json = new JsonStore(
+      path.join(__dirname, 'karma.json'),
+      path.join(__dirname, 'tokens.json'),
+      path.join(__dirname, 'pending.json')
+    );
+    await json.init();
+    return json;
+  }
+}
+
+class JsonStore {
+  constructor(karmaPath, tokensPath, pendingPath) {
+    this.karmaPath = karmaPath;
+    this.tokensPath = tokensPath;
+    this.pendingPath = pendingPath;
+    this.data = { users: {}, totalChanges: 0 };
+    this.tokens = null;
+    this.pending = { byId: {} };
+  }
+
+  async init() {
+    try {
+      if (fs.existsSync(this.karmaPath)) this.data = JSON.parse(fs.readFileSync(this.karmaPath, 'utf8'));
+      if (fs.existsSync(this.tokensPath)) this.tokens = JSON.parse(fs.readFileSync(this.tokensPath, 'utf8'));
+      if (fs.existsSync(this.pendingPath)) this.pending = JSON.parse(fs.readFileSync(this.pendingPath, 'utf8'));
+    } catch(e) { console.error('[JsonStore] init', e); }
+  }
+
+  async _saveKarma() { fs.writeFileSync(this.karmaPath, JSON.stringify(this.data, null, 2)); }
+  async _saveTokens() { fs.writeFileSync(this.tokensPath, JSON.stringify(this.tokens || {}, null, 2)); }
+  async _savePending() { fs.writeFileSync(this.pendingPath, JSON.stringify(this.pending || {byId:{}}, null, 2)); }
+
+  async getAll() { return this.data.users; }
+  async getUser(user) { return this.data.users[user] || 0; }
+
+  async applyDelta(user, delta) {
+    const u = user.trim();
+    const current = await this.getUser(u);
+    const next = Math.max(-5, Math.min(5, current + delta));
+    this.data.users[u] = next;
+    this.data.totalChanges = (this.data.totalChanges || 0) + 1;
+    await this._saveKarma();
+    return next;
+  }
+
+  async setUser(user, value) {
+    const u = user.trim();
+    const v = Math.max(-5, Math.min(5, Number(value) || 0));
+    this.data.users[u] = v;
+    this.data.totalChanges = (this.data.totalChanges || 0) + 1;
+    await this._saveKarma();
+    return v;
+  }
+
+  async saveTokens(obj) { this.tokens = obj; await this._saveTokens(); }
+  async loadTokens() { return this.tokens; }
+
+  // Pending
+  async pendingAdd(rec) { 
+    this.pending.byId[rec.id] = rec; 
+    await this._savePending(); 
+  }
+  async pendingGet(id) { return this.pending.byId[id]; }
+  async pendingAll() { return this.pending.byId; }
+  async pendingDelete(id) { delete this.pending.byId[id]; await this._savePending(); }
+}
+
 class PgStore {
   constructor(DATABASE_URL){
     this.pool = new Pool({
       connectionString: DATABASE_URL,
-      ssl: { rejectUnauthorized: false }
+      ssl: {
+        rejectUnauthorized: false
+      }
     });
   }
 
@@ -50,14 +131,11 @@ class PgStore {
   }
 
   async applyDelta(user, delta) {
-    const d = parseFloat(delta); // forcer delta en nombre
     const r = await this.pool.query(
-      `insert into karma (user_name, value) 
-       values ($1, greatest(-5.0, least(5.0, $2)))
-       on conflict (user_name) 
-       do update set value = greatest(-5.0, least(5.0, karma.value + $2))
+      `insert into karma (user_name, value) values ($1, greatest(-5, least(5, $2)))
+       on conflict (user_name) do update set value = greatest(-5, least(5, karma.value + $2))
        returning value`,
-      [user, d]
+      [user, delta]
     );
     return parseFloat(r.rows[0].value);
   }
@@ -136,7 +214,5 @@ class PgStore {
     return out;
   }
 
-  async pendingDelete(id){ 
-    await this.pool.query('delete from pending where id=$1', [id]); 
-  }
+  async pendingDelete(id){ await this.pool.query('delete from pending where id=$1', [id]); }
 }
