@@ -67,7 +67,10 @@ class JsonStore {
   async loadTokens() { return this.tokens; }
 
   // Pending
-  async pendingAdd(rec) { this.pending.byId[rec.id] = rec; await this._savePending(); }
+  async pendingAdd(rec) { 
+    this.pending.byId[rec.id] = rec; 
+    await this._savePending(); 
+  }
   async pendingGet(id) { return this.pending.byId[id]; }
   async pendingAll() { return this.pending.byId; }
   async pendingDelete(id) { delete this.pending.byId[id]; await this._savePending(); }
@@ -75,7 +78,6 @@ class JsonStore {
 
 class PgStore {
   constructor(DATABASE_URL){
-    // SSL activé pour Render
     this.pool = new Pool({
       connectionString: DATABASE_URL,
       ssl: {
@@ -162,6 +164,9 @@ class PgStore {
 
   // Pending
   async pendingAdd(rec){
+    // ⚠️ FORCER delta en nombre pour éviter l'erreur Postgres
+    if (typeof rec.delta === 'string') rec.delta = parseFloat(rec.delta);
+
     await this.pool.query(
       `insert into pending (id, user_name, title, delta, reward_id, broadcaster_id, at, status)
        values ($1,$2,$3,$4,$5,$6,$7,$8)
