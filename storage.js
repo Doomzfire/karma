@@ -73,7 +73,7 @@ class PgStore {
     await this.pool.query(`
       create table if not exists karma (
         user_name text primary key,
-        value integer not null default 0
+        value numeric(10.3) not null default 0
       );
     `);
     await this.pool.query(`
