@@ -4,8 +4,8 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "migrate": "node migrate.js"
+    "start": "node migrate.js && node index.js",
+    "migrate": "node migrate.js"       
   },
   "dependencies": {
     "express": "^4.19.2",
