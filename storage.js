@@ -9,11 +9,7 @@ export async function createStore({ __dirname, DATABASE_URL }) {
     await pg.init();
     return pg;
   } else {
-    const json = new JsonStore(
-      path.join(__dirname, 'karma.json'),
-      path.join(__dirname, 'tokens.json'),
-      path.join(__dirname, 'pending.json')
-    );
+    const json = new JsonStore(path.join(__dirname, 'karma.json'), path.join(__dirname, 'tokens.json'), path.join(__dirname, 'pending.json'));
     await json.init();
     return json;
   }
@@ -28,15 +24,13 @@ class JsonStore {
     this.tokens = null;
     this.pending = { byId: {} };
   }
-
   async init() {
     try {
       if (fs.existsSync(this.karmaPath)) this.data = JSON.parse(fs.readFileSync(this.karmaPath, 'utf8'));
       if (fs.existsSync(this.tokensPath)) this.tokens = JSON.parse(fs.readFileSync(this.tokensPath, 'utf8'));
       if (fs.existsSync(this.pendingPath)) this.pending = JSON.parse(fs.readFileSync(this.pendingPath, 'utf8'));
-    } catch(e) { console.error('[JsonStore] init', e); }
+    } catch(e){ console.error('[JsonStore] init', e); }
   }
-
   async _saveKarma(){ fs.writeFileSync(this.karmaPath, JSON.stringify(this.data, null, 2)); }
   async _saveTokens(){ fs.writeFileSync(this.tokensPath, JSON.stringify(this.tokens || {}, null, 2)); }
   async _savePending(){ fs.writeFileSync(this.pendingPath, JSON.stringify(this.pending || {byId:{}}, null, 2)); }
@@ -73,15 +67,9 @@ class JsonStore {
 
 class PgStore {
   constructor(DATABASE_URL){
-    // Forcer SSL pour Render
-    const DATABASE_URL_SSL = DATABASE_URL.includes('?') ? DATABASE_URL + '&sslmode=require' : DATABASE_URL + '?sslmode=require';
-    this.pool = new Pool({
-      connectionString: DATABASE_URL_SSL,
-      ssl: { rejectUnauthorized: false }
-    });
+    this.pool = new Pool({ connectionString: DATABASE_URL, ssl: process.env.PGSSLMODE ? { rejectUnauthorized: false } : undefined });
   }
-
-  async init() {
+  async init(){
     await this.pool.query(`
       create table if not exists karma (
         user_name text primary key,
@@ -107,19 +95,16 @@ class PgStore {
       );
     `);
   }
-
   async getAll(){
     const r = await this.pool.query('select user_name, value from karma');
     const out = {};
     for (const row of r.rows) out[row.user_name] = row.value;
     return out;
   }
-
   async getUser(user){
     const r = await this.pool.query('select value from karma where user_name=$1', [user]);
     return r.rows[0]?.value || 0;
   }
-
   async applyDelta(user, delta){
     const r = await this.pool.query(
       `insert into karma (user_name, value) values ($1, greatest(-5, least(5, $2)))
@@ -129,7 +114,6 @@ class PgStore {
     );
     return r.rows[0].value;
   }
-
   async setUser(user, value){
     const v = Math.max(-5, Math.min(5, parseInt(value, 10) || 0));
     await this.pool.query(
@@ -139,7 +123,6 @@ class PgStore {
     );
     return v;
   }
-
   async saveTokens(obj){
     await this.pool.query(
       `insert into tokens (id, data) values (1, $1)
@@ -147,32 +130,19 @@ class PgStore {
       [obj]
     );
   }
-
   async loadTokens(){
     const r = await this.pool.query('select data from tokens where id=1');
     return r.rows[0]?.data || null;
   }
-
   // Pending
   async pendingAdd(rec){
-    // Forcer delta en entier
-    rec.delta = parseInt(rec.delta, 10) || 0;
-
     await this.pool.query(
       `insert into pending (id, user_name, title, delta, reward_id, broadcaster_id, at, status)
        values ($1,$2,$3,$4,$5,$6,$7,$8)
-       on conflict (id) do update set 
-         user_name=excluded.user_name, 
-         title=excluded.title, 
-         delta=excluded.delta, 
-         reward_id=excluded.reward_id, 
-         broadcaster_id=excluded.broadcaster_id, 
-         at=excluded.at, 
-         status=excluded.status`,
+       on conflict (id) do update set user_name=excluded.user_name, title=excluded.title, delta=excluded.delta, reward_id=excluded.reward_id, broadcaster_id=excluded.broadcaster_id, at=excluded.at, status=excluded.status`,
       [rec.id, rec.user, rec.title, rec.delta, rec.reward_id, rec.broadcaster_id, rec.at, rec.status]
     );
   }
-
   async pendingGet(id){
     const r = await this.pool.query('select * from pending where id=$1', [id]);
     return r.rows[0] && {
@@ -186,7 +156,6 @@ class PgStore {
       status: r.rows[0].status
     };
   }
-
   async pendingAll(){
     const r = await this.pool.query('select * from pending order by at asc');
     const out = {};
@@ -199,8 +168,5 @@ class PgStore {
     }
     return out;
   }
-
-  async pendingDelete(id){
-    await this.pool.query('delete from pending where id=$1', [id]);
-  }
+  async pendingDelete(id){ await this.pool.query('delete from pending where id=$1', [id]); }
 }
