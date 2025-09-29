@@ -110,16 +110,17 @@ class PgStore {
     return r.rows[0]?.value || 0;
   }
   async applyDelta(user, delta){
+    const d = Math.round(Number(delta));
     const r = await this.pool.query(
       `insert into karma (user_name, value) values ($1, greatest(-5, least(5, $2)))
        on conflict (user_name) do update set value = greatest(-5, least(5, karma.value + $2))
        returning value`,
-      [user, delta]
+      [user, d]
     );
     return r.rows[0].value;
   }
   async setUser(user, value){
-    const v = Math.max(-5, Math.min(5, parseInt(value, 10) || 0));
+    const v = Math.max(-5, Math.min(5, Math.round(Number(value))));
     await this.pool.query(
       `insert into karma (user_name, value) values ($1, $2)
        on conflict (user_name) do update set value = excluded.value`,
