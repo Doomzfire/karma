@@ -75,9 +75,12 @@ class JsonStore {
 
 class PgStore {
   constructor(DATABASE_URL){
+    // SSL activé pour Render
     this.pool = new Pool({
       connectionString: DATABASE_URL,
-      ssl: process.env.PGSSLMODE ? { rejectUnauthorized: false } : undefined
+      ssl: {
+        rejectUnauthorized: false
+      }
     });
   }
 
