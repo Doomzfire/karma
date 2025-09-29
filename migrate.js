@@ -1,30 +1,33 @@
-import pkg from 'pg';
-const { Pool } = pkg;
+import { createStore } from './storage.js';
+import path from 'path';
+import url from 'url';
 
-const DATABASE_URL = process.env.DATABASE_URL;
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
+const DATABASE_URL = process.env.DATABASE_URL; // Render va injecter automatiquement l'URL
 if (!DATABASE_URL) {
-  console.error('❌ DATABASE_URL not set in your environment.');
+  console.error('DATABASE_URL missing');
   process.exit(1);
 }
 
 async function migrate() {
-  const pool = new Pool({ connectionString: DATABASE_URL, ssl: { rejectUnauthorized: false } });
-  try {
-    console.log('🔹 Starting migration...');
+  const store = await createStore({ __dirname, DATABASE_URL });
+  console.log('Connecting to DB...');
 
-    // Vérifie si la colonne delta existe et modifie son type en numeric(10,3)
-    await pool.query(`
-      ALTER TABLE pending
-      ALTER COLUMN delta TYPE numeric(10,3) USING delta::numeric;
-    `);
+  const pending = await store.pendingAll();
 
-    console.log('✅ Migration complete! Column "delta" now supports decimals.');
-  } catch (err) {
-    console.error('❌ Migration failed:', err.message);
-  } finally {
-    await pool.end();
+  for (const [id, rec] of Object.entries(pending)) {
+    if (typeof rec.delta === 'string') {
+      rec.delta = parseFloat(rec.delta);
+    }
+    if (!Number.isFinite(rec.delta)) continue;
+
+    console.log(`Updating pending: ${id}, delta=${rec.delta}`);
+    await store.pendingAdd(rec); // réécrit avec le delta correct
   }
+
+  console.log('Migration finished ✅');
+  process.exit(0);
 }
 
-migrate();
+migrate().catch(e => { console.error(e); process.exit(1); });
