@@ -40,7 +40,9 @@ class JsonStore {
   async applyDelta(user, delta) {
     const u = user.trim();
     const current = await this.getUser(u);
-    const next = Math.max(-5, Math.min(5, current + delta));
+    let next = current + delta;
+    next = Math.max(-25, Math.min(25, next));
+    next = Math.round(next * 100000) / 100000;
     this.data.users[u] = next;
     this.data.totalChanges = (this.data.totalChanges || 0) + 1;
     await this._saveKarma();
@@ -49,7 +51,9 @@ class JsonStore {
   async setUser(user, value) {
     const u = user.trim();
     const current = await this.getUser(u);
-    const v = Math.max(-5, Math.min(5, current + parseFloat(value) || 0));
+    let v = Number(value);
+    v = Math.max(-25, Math.min(25, v));
+    v = Math.round(v * 100000) / 100000;
     this.data.users[u] = v;
     this.data.totalChanges = (this.data.totalChanges || 0) + 1;
     await this._saveKarma();
@@ -78,7 +82,7 @@ class PgStore {
     await this.pool.query(`
       create table if not exists karma (
         user_name text primary key,
-        value integer not null default 0
+        value numeric not null default 0
       );
     `);
     await this.pool.query(`
@@ -111,17 +115,19 @@ class PgStore {
     return r.rows[0]?.value || 0;
   }
   async applyDelta(user, delta){
-    const d = Math.round(Number(delta));
+    const d = Number(delta);
     const r = await this.pool.query(
-      `insert into karma (user_name, value) values ($1, greatest(-5, least(5, $2)))
-       on conflict (user_name) do update set value = greatest(-5, least(5, karma.value + $2))
+      `insert into karma (user_name, value) values ($1, greatest(-25, least(25, $2)))
+       on conflict (user_name) do update set value = greatest(-25, least(25, karma.value + $2))
        returning value`,
       [user, d]
     );
-    return r.rows[0].value;
+    return Math.round(r.rows[0].value * 100000) / 100000; // 5 décimales
   }
   async setUser(user, value){
-    const v = Math.max(-5, Math.min(5, Math.round(Number(value))));
+    let v = Number(value);
+    v = Math.max(-25, Math.min(25, v));
+    v = Math.round(v * 100000) / 100000;
     await this.pool.query(
       `insert into karma (user_name, value) values ($1, $2)
        on conflict (user_name) do update set value = excluded.value`,
