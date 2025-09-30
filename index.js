@@ -37,7 +37,7 @@ const stripEmoji = (s) => s.replace(/[\p{Emoji_Presentation}\p{Extended_Pictogra
 const DEFAULT_REWARD_MAP = {
   "heal💓": 1, "heal": 1,
   "eat🍏": 1, "eat": 1,
-  "hydrate💧": 1, "hydrate": 1,
+  "hydrate💧": 0.10, "hydrate": 0.10,
   "bleed🩸": -1, "bleed": -1,
   "thirst🥵": -1, "thirst": -1,
   "hunger🦴": -1, "hunger": -1
