@@ -31,14 +31,14 @@ class SupabaseStore {
 
   async applyDelta(user, delta) {
     const current = await this.getUser(user);
-    let next = Math.max(-25, Math.min(25, current + delta));
+    let next = Math.max(-30, Math.min(30, current + delta));
     next = Math.round(next * 100000) / 100000;
     await this.supabase.from('karma').upsert({ user_name: user, value: next });
     return next;
   }
 
   async setUser(user, value) {
-    let v = Math.max(-25, Math.min(25, value));
+    let v = Math.max(-30, Math.min(30, value));
     v = Math.round(v * 100000) / 100000;
     await this.supabase.from('karma').upsert({ user_name: user, value: v });
     return v;
