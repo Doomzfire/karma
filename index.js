@@ -35,13 +35,13 @@ const ADMIN_KEY = process.env.ADMIN_KEY || ''; // enable admin API
 const norm = (s) => (s || '').toString().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 const stripEmoji = (s) => s.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, '').trim();
 const DEFAULT_REWARD_MAP = {
-  "heal💓": 0.250, "heal": 0.250,
-  "eat🍏": 0.150, "eat": 0.150,
-  "hydrate💧": 0.100, "hydrate": 0.100,
-  "🔥👋A Hello!👋🔥": 0.050, "hello": 0.050,
-  "bleed🩸": -0.250, "bleed": -0.250,
-  "thirst🥵": -0.150, "thirst": -0.150,
-  "hunger🦴": -0.100, "hunger": -0.100
+  "heal💓": 0.050, "heal": 0.050,
+  "eat🍏": 0.015, "eat": 0.015,
+  "hydrate💧": 0.010, "hydrate": 0.010,
+  "🔥👋A Hello!👋🔥": 0.005, "hello": 0.005,
+  "bleed🩸": -0.050, "bleed": -0.050,
+  "thirst🥵": -0.010, "thirst": -0.010,
+  "hunger🦴": -0.015, "hunger": -0.015
 };
 function buildNormalizedMap(raw) {
   const out = {};
