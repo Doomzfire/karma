@@ -270,4 +270,99 @@ app.get('/auth/callback', async (req, res) => {
     const tok = await exchangeCodeForToken(code);
     const info = await getUserInfo(tok.access_token);
     const data = {
-      access_token: tok.access
+      access_token: tok.access_token,
+      refresh_token: tok.refresh_token,
+      obtained_at: Date.now(),
+      scope: tok.scope,
+      broadcaster_login: (info && info.login || '').toLowerCase(),
+      broadcaster_id: info && info.id
+    };
+    await store.saveTokens(data);
+    await startEventSubWithTokens(data);
+    res.type('text/html').send('<h1>Auth successful</h1>');
+  } catch (e) {
+    console.error('[auth]', e.message);
+    res.status(500).type('text/html').send('<h1>Auth error</h1>');
+  }
+});
+app.get('/api/karma', async (req, res) => res.json(await store.getAll()));
+app.get('/api/karma/pending', async (req, res) => res.json(await store.pendingAll()));
+app.get('/api/karma/:user', async (req, res) => res.json({ user: req.params.user, value: await store.getUser(req.params.user) }));
+app.use('/overlay', express.static(path.join(__dirname, 'public')));
+
+/* ─────────────── Admin endpoints ─────────────── */
+function requireAdmin(req, res, next) {
+  if (!ADMIN_KEY) return res.status(503).json({ error: 'Admin API disabled' });
+  const key = req.headers['x-admin-key'] || req.query.key;
+  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'Unauthorized' });
+  next();
+}
+
+app.post('/api/admin/karma/reset/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  const current = await store.getUser(user);
+  const delta = -current;
+  if (delta !== 0) {
+    const value = await store.applyDelta(user, delta);
+    broadcastUpdate(user, value, delta, 'admin:reset');
+    return res.json({ user, value, delta });
+  }
+  res.json({ user, value: current, delta: 0 });
+});
+
+app.post('/api/admin/karma/set/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  let value = Number(req.body?.value);
+  if (!Number.isFinite(value)) return res.status(400).json({ error: 'Body { value:number } required' });
+  const current = await store.getUser(user);
+  const delta = value - current;
+  if (delta !== 0) {
+    const newVal = await store.applyDelta(user, delta);
+    broadcastUpdate(user, newVal, delta, 'admin:set');
+    return res.json({ user, value: newVal, delta });
+  }
+  res.json({ user, value: current, delta: 0 });
+});
+
+app.post('/api/admin/karma/add/:user', requireAdmin, async (req, res) => {
+  const user = req.params.user;
+  let delta = Number(req.body?.delta);
+  if (!Number.isFinite(delta) || delta === 0) return res.status(400).json({ error: 'Body { delta:number (non-zero) } required' });
+  const value = await store.applyDelta(user, delta);
+  broadcastUpdate(user, value, delta, 'admin:add');
+  res.json({ user, value, delta });
+});
+
+/* ─────────────── Boot + EventSub ─────────────── */
+let eventsub = null;
+async function boot() {
+  let tokens = await store.loadTokens();
+  if (!tokens) { console.log('Authorize at', redirectUri(), '/auth/login'); return; }
+  if (tokens.refresh_token) {
+    try {
+      const rt = await refreshToken(tokens.refresh_token);
+      tokens.access_token = rt.access_token;
+      tokens.refresh_token = rt.refresh_token || tokens.refresh_token;
+      await store.saveTokens(tokens);
+    } catch (e) {
+      console.warn('[boot] refresh failed:', e.message);
+      console.log('Re-authorize at', redirectUri(), '/auth/login');
+      return;
+    }
+  }
+  await startEventSubWithTokens(tokens);
+}
+async function startEventSubWithTokens(tokens) {
+  const info = await getUserInfo(tokens.access_token);
+  const bId = info.id;
+  console.log('[boot] EventSub for', info.login, `(${bId})`);
+  if (eventsub) eventsub.stop();
+  eventsub = new EventSubWS({ accessToken: tokens.access_token, broadcasterId: bId });
+  eventsub.start();
+}
+
+/* ─────────────── Listen ─────────────── */
+server.listen(PORT, () => {
+  console.log(`HTTP + Socket.IO on port ${PORT}`);
+  boot().catch(e => console.error('[boot]', e.message));
+});
