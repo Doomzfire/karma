@@ -48,7 +48,8 @@ class JsonStore {
   }
   async setUser(user, value) {
     const u = user.trim();
-    const v = Math.max(-5, Math.min(5, parseInt(value, 10) || 0));
+    const current = await this.getUser(u);
+    const v = Math.max(-5, Math.min(5, current + parseFloat(value) || 0));
     this.data.users[u] = v;
     this.data.totalChanges = (this.data.totalChanges || 0) + 1;
     await this._saveKarma();
