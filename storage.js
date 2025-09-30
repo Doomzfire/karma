@@ -78,7 +78,7 @@ class PgStore {
     await this.pool.query(`
       create table if not exists karma (
         user_name text primary key,
-        value integer not null default 0
+        value numeric(10,3) not null default 0
       );
     `);
     await this.pool.query(`
@@ -92,7 +92,7 @@ class PgStore {
         id text primary key,
         user_name text not null,
         title text not null,
-        delta integer not null,
+        delta numeric(10,3) not null,
         reward_id text,
         broadcaster_id text,
         at bigint,
@@ -121,7 +121,7 @@ class PgStore {
     return r.rows[0].value;
   }
   async setUser(user, value){
-    const v = Math.max(-5, Math.min(5, Math.round(Number(value))));
+    const v = Math.max(-5, Math.min(5, Number(value)));
     await this.pool.query(
       `insert into karma (user_name, value) values ($1, $2)
        on conflict (user_name) do update set value = excluded.value`,
