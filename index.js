@@ -39,7 +39,7 @@ const DEFAULT_REWARD_MAP = {
   "hydrate💧": 0.01, "hydrate": 0.01,
   "🔥👋A Hello!👋🔥": 0.1, "hello": 0.1,
   "🔥Hellstorm Goggles🔥🥽": -0.07, "Goggles": -0.07,
-  "bleed🩸": -0.05, "bleed": -0.05,
+  "Hurt💔": -0.05, "hurt": -0.05,
   "thirst🥵": -0.01, "thirst": -0.01,
   "hunger🦴": -0.02, "hunger": -0.02
 };
